@@ -1,0 +1,30 @@
+{
+  "id": "incompetech",
+  "name": "Incompetech",
+  "version": "0.2.1",
+  "main": "index.js",
+  "playback": "stream",
+  "permissions": {
+    "network": [
+      "incompetech.com",
+      "musicbrainz.org",
+      "coverartarchive.org"
+    ]
+  },
+  "navigation": [
+    {
+      "builtin": "home"
+    },
+    {
+      "title": "Genres",
+      "page": "genres",
+      "icon": "music"
+    },
+    {
+      "title": "Moods",
+      "page": "moods",
+      "icon": "smile"
+    }
+  ],
+  "minAppVersion": "0.1.8"
+}
