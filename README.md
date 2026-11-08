@@ -19,14 +19,14 @@ No account, API key, or extra program is needed.
 - Search tracks, collections, and artists; explore genres and moods.
 - Browse recent additions and featured music.
 - Stream MP3 directly from Incompetech.
-- Show album covers when an exact Kevin MacLeod release match is available through MusicBrainz / Cover Art Archive.
+- Show real release artwork for tracks linked by Incompetech to Apple Music, with exact MusicBrainz / Cover Art Archive matches as a fallback on collection pages.
 - Use MyGo Music's built-in song cache.
 
 Some collections have no matching cover art. Sign-in, synced favorites, lyrics, lossless streams, and paid WAV downloads are not supported.
 
 ## Sources and caching
 
-The plugin reads Incompetech's [machine-readable catalog](https://incompetech.com/agent-section/) and uses official MP3 URLs. It caches catalog metadata for **24 hours** and cover-match results for **30 days** (or **7 days** when no match is found) using `host.storage`.
+The plugin reads Incompetech's [machine-readable catalog](https://incompetech.com/agent-section/) and plays its official MP3 URLs. For tracks with an official Apple Music link, it looks up the actual release artwork in batches via the iTunes Lookup API. Incompetech's genre-based collections are not necessarily albums, so not every track has artwork. Catalog metadata is cached for **24 hours**; artwork matches for **30 days** (missing results for **7 days**) via `host.storage`.
 
 MyGo Music handles song and artwork caching. No audio or cover images are bundled or redistributed by this repository.
 

@@ -19,14 +19,14 @@
 - 搜索歌曲、合集和艺人，按曲风与情绪浏览。
 - 浏览近期上架和精选作品。
 - 直接播放 Incompetech 官方 MP3。
-- 通过 MusicBrainz / Cover Art Archive 为准确匹配的 Kevin MacLeod 发行专辑显示封面。
+- 优先利用 Incompetech 官方提供的 Apple Music 链接获取真实发行封面；合集页面仍可尝试 MusicBrainz / Cover Art Archive 精确匹配。
 - 使用 MyGo Music 自带的歌曲缓存。
 
 部分合集没有匹配的封面。暂不支持账号登录、同步收藏、歌词、无损音频及付费 WAV 下载。
 
 ## 数据来源与缓存
 
-插件使用 Incompetech 的[官方机器可读曲库](https://incompetech.com/agent-section/)和 MP3 直链。曲库元数据通过 `host.storage` 缓存 **24 小时**；封面匹配结果缓存 **30 天**，未匹配结果缓存 **7 天**。
+插件从 Incompetech 的[官方机器可读曲库](https://incompetech.com/agent-section/)获取音频直链，并将官方给出的 Apple Music 发行 ID 批量交给 iTunes Lookup API 查询封面。Incompetech 的主题合集不一定是正式专辑，部分歌曲仍可能没有封面。曲库元数据通过 `host.storage` 缓存 **24 小时**；封面匹配结果缓存 **30 天**，未匹配结果缓存 **7 天**。
 
 歌曲和封面图片的缓存由 MyGo Music 负责；本仓库不打包或二次分发任何音频及封面图片。
 

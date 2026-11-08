@@ -1,12 +1,13 @@
 {
   "id": "incompetech",
   "name": "Incompetech",
-  "version": "0.2.1",
+  "version": "0.2.2",
   "main": "index.js",
   "playback": "stream",
   "permissions": {
     "network": [
       "incompetech.com",
+      "itunes.apple.com",
       "musicbrainz.org",
       "coverartarchive.org"
     ]

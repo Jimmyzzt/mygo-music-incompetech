@@ -11,8 +11,12 @@ const TTL_MS = 24 * 60 * 60 * 1000;
 const COVER_TTL_MS = 30 * TTL_MS;
 const MISSING_COVER_TTL_MS = 7 * TTL_MS;
 const MB_INTERVAL_MS = 1300;
+const APPLE_CACHE_KEY = "incompetechAppleArtworkV1";
+const APPLE_ID_PREFIX = "apple:";
+const APPLE_LOOKUP_BATCH = 50;
+const APPLE_LOOKUP_WAIT_MS = 4500;
 // MusicBrainz requires an identifiable User-Agent; see its API guidelines.
-const MUSICBRAINZ_AGENT = "mygo-music-incompetech/0.2.1 (https://github.com/Jimmyzzt/mygo-music-incompetech)";
+const MUSICBRAINZ_AGENT = "mygo-music-incompetech/0.2.2 (https://github.com/Jimmyzzt/mygo-music-incompetech)";
 const PAGE_SIZE = 40;
 const ARTIST = { id: "kevin-macleod", name: "Kevin MacLeod" };
 const ARTIST_NAME = "Kevin MacLeod";
@@ -29,6 +33,7 @@ let pending = null;
 let coverQueue = Promise.resolve();
 let coverNextRequestAt = 0;
 const coverInFlight = new Map();
+const appleInFlight = new Map();
 
 // MusicBrainz has a one-request-per-second policy. We only resolve actual
 // named releases on demand; Incompetech collection names are not necessarily
@@ -120,6 +125,102 @@ async function coverForAlbum(album) {
 }
 
 
+// The official Incompetech catalog points many recordings to their exact
+// Apple Music/iTunes release. These are real *release* IDs, unlike Incompetech's
+// own "collections", which are mostly themes such as "African" or "Action".
+function appleReleaseId(link) {
+  if (!link || typeof link !== "string") return null;
+  try {
+    const u = new URL(link);
+    if (!(["music.apple.com", "itunes.apple.com"].includes(u.hostname))) return null;
+    const match = u.pathname.match(/\/album\/.*\/(?:id)?(\d+)\/?$/);
+    return match ? match[1] : null;
+  } catch { return null; }
+}
+
+function readAppleCache() {
+  const value = host.storage.get(APPLE_CACHE_KEY);
+  return value && typeof value === "object" ? value : {};
+}
+
+function freshAppleRecord(value) {
+  return value && Number.isFinite(value.at) && Date.now() - value.at <
+    (value.url ? COVER_TTL_MS : MISSING_COVER_TTL_MS);
+}
+
+// An external album is only attached to tracks that Incompetech itself
+// explicitly links to this release. Never use one artwork for an unrelated
+// Incompetech thematic collection containing many different albums.
+function applyAppleRecord(c, id, record) {
+  if (!record?.url || !record.name || !c.appleTracks.has(id)) return;
+  let album = c.appleAlbums.get(id);
+  if (!album) {
+    album = { id: APPLE_ID_PREFIX + id, name: record.name, artists: [ARTIST] };
+    c.appleAlbums.set(id, album);
+  }
+  album.name = record.name;
+  album.imageUrl = record.url;
+  for (const track of c.appleTracks.get(id)) track.album = album;
+}
+
+// Resolve up to 50 OFFICIAL release IDs in a single iTunes Lookup API call,
+// with no fuzzy name search. Apple only supplies artwork metadata; MP3 audio
+// always streams directly from Incompetech. Album covers themselves are only
+// fetched by MyGo when they appear on screen.
+async function fetchAppleRecords(c, ids) {
+  const url = `https://itunes.apple.com/lookup?id=${ids.join(",")}&country=us`;
+  try {
+    const body = await getJSON(url);
+    const found = new Map();
+    for (const item of Array.isArray(body.results) ? body.results : []) {
+      const id = String(item.collectionId ?? "");
+      if (!ids.includes(id) || item.wrapperType !== "collection") continue;
+      if (cleanAlbumName(item.artistName) !== cleanAlbumName(ARTIST_NAME)) continue;
+      const artwork = item.artworkUrl600 || item.artworkUrl100;
+      if (typeof artwork !== "string" || !artwork.startsWith("https://")) continue;
+      if (!item.collectionName) continue;
+      found.set(id, { url: artwork, name: item.collectionName, at: Date.now() });
+    }
+    const store = readAppleCache();
+    for (const id of ids) {
+      // Genuine missing IDs get a short negative TTL. Network failures are not
+      // negative cached. This whole batch is only written to storage once.
+      const record = found.get(id) || { url: null, at: Date.now() };
+      store[id] = record;
+      applyAppleRecord(c, id, record);
+    }
+    host.storage.set(APPLE_CACHE_KEY, store);
+  } catch (_error) {
+    // Artwork is optional; unreachable services must not block playback.
+  }
+}
+
+async function artworkForTracks(c, tracks) {
+  const ids = [...new Set(tracks.map((t) => c.rawById.get(t.id)?.appleReleaseId).filter(Boolean))];
+  if (!ids.length) return;
+  const store = readAppleCache();
+  const missing = [];
+  for (const id of ids) {
+    if (freshAppleRecord(store[id])) applyAppleRecord(c, id, store[id]);
+    else missing.push(id);
+  }
+  // Deduplicate concurrent searches, Home and album page requests.
+  for (let i = 0; i < missing.length; i += APPLE_LOOKUP_BATCH) {
+    const group = missing.slice(i, i + APPLE_LOOKUP_BATCH).filter((id) => !appleInFlight.has(id));
+    if (!group.length) continue;
+    const task = fetchAppleRecords(c, group);
+    for (const id of group) appleInFlight.set(id, task);
+    task.finally(() => { for (const id of group) if (appleInFlight.get(id) === task) appleInFlight.delete(id); });
+  }
+  const jobs = [...new Set(missing.map((id) => appleInFlight.get(id)).filter(Boolean))];
+  if (!jobs.length) return;
+  // Don't hold up the user's Home/search page indefinitely on a blocked API.
+  await Promise.race([
+    Promise.all(jobs),
+    pause(APPLE_LOOKUP_WAIT_MS),
+  ]);
+}
+
 function fail(code, message) {
   const e = new Error(message);
   e.code = code;
@@ -172,6 +273,8 @@ function toCatalog(pieces, genres, collections) {
   const tracks = [];
   const albumTracks = new Map();
   const albums = new Map();
+  const appleTracks = new Map();
+  const appleAlbums = new Map();
   const moods = new Set();
   const genresFound = new Map();
 
@@ -205,7 +308,12 @@ function toCatalog(pieces, genres, collections) {
       description: `${description}\n\nMusic: Kevin MacLeod (incompetech.com) — CC BY 4.0: ${LICENSE_URL}`.trim(),
     };
     tracks.push(track);
-    rawById.set(id, { ...p, genreName, feel });
+    const appleId = appleReleaseId(p.itunes);
+    rawById.set(id, { ...p, appleReleaseId: appleId, genreName, feel });
+    if (appleId) {
+      if (!appleTracks.has(appleId)) appleTracks.set(appleId, []);
+      appleTracks.get(appleId).push(track);
+    }
     if (!albumTracks.has(album.id)) albumTracks.set(album.id, []);
     albumTracks.get(album.id).push(track);
   }
@@ -215,6 +323,11 @@ function toCatalog(pieces, genres, collections) {
     const record = cachedCovers[album.id];
     if (record?.url && Date.now() - record.at < COVER_TTL_MS) album.imageUrl = record.url;
   }
+  const cachedApple = readAppleCache();
+  const c = { appleTracks, appleAlbums };
+  for (const [id, record] of Object.entries(cachedApple)) {
+    if (freshAppleRecord(record)) applyAppleRecord(c, id, record);
+  }
   const byTitle = [...tracks].sort((a, b) => a.name.localeCompare(b.name));
   const recent = [...tracks].sort((a, b) => {
     const x = rawById.get(a.id)?.uploaded || "";
@@ -222,7 +335,7 @@ function toCatalog(pieces, genres, collections) {
     return y.localeCompare(x);
   });
   return {
-    tracks, byTitle, recent, rawById, albumTracks, albums: [...albums.values()],
+    tracks, byTitle, recent, rawById, albumTracks, appleTracks, appleAlbums, albums: [...albums.values()],
     genres: [...genresFound].filter(([id]) => id !== "").sort((a, b) => a[1].localeCompare(b[1])),
     moods: [...moods].sort((a, b) => a.localeCompare(b)),
   };
@@ -280,6 +393,7 @@ export async function search({ query = "", kind = "tracks", offset = 0 } = {}) {
       .sort((a, b) => b.rank - a.rank || a.track.name.localeCompare(b.track.name))
       .map((x) => x.track);
     const page = pageOf(matches, offset);
+    await artworkForTracks(c, page.items);
     return { tracks: page.items, more: page.more };
   }
   if (kind === "albums") {
@@ -303,6 +417,7 @@ export async function suggest({ query = "" } = {}) {
 export async function home() {
   const c = await loadCatalog();
   const curated = POPULAR_TITLES.map((name) => c.tracks.find((t) => normalize(t.name) === normalize(name))).filter(Boolean);
+  await artworkForTracks(c, [...curated, ...c.recent.slice(0, 20)]);
   return {
     title: "Incompetech · Kevin MacLeod",
     subtitle: "Royalty-free soundtrack catalog. Reuse requires attribution (CC BY 4.0).",
@@ -341,12 +456,14 @@ export async function browse({ page = "" } = {}) {
     const name = c.genres.find(([n]) => n === id)?.[1];
     if (!name) throw fail("unavailable", "Unknown genre");
     const tracks = c.byTitle.filter((t) => String(c.rawById.get(t.id)?.genre ?? "") === id);
+    await artworkForTracks(c, tracks.slice(0, 60));
     return { title: name, sections: [{ title: `${tracks.length} tracks`, tracks }] };
   }
   if (page.startsWith("mood:")) {
     const mood = decodeURIComponent(page.slice(5));
     const tracks = c.byTitle.filter((t) => c.rawById.get(t.id)?.feel.some((x) => normalize(x) === normalize(mood)));
     if (!tracks.length) throw fail("unavailable", "Unknown mood");
+    await artworkForTracks(c, tracks.slice(0, 60));
     return { title: mood, sections: [{ title: `${tracks.length} tracks`, tracks }] };
   }
   throw fail("unavailable", "No such page");
@@ -354,15 +471,24 @@ export async function browse({ page = "" } = {}) {
 
 export async function album({ id }) {
   const c = await loadCatalog();
+  if (id.startsWith(APPLE_ID_PREFIX)) {
+    const appleId = id.slice(APPLE_ID_PREFIX.length);
+    const tracks = c.appleTracks.get(appleId);
+    if (!tracks?.length) throw fail("unavailable", "No such album");
+    await artworkForTracks(c, tracks.slice(0, 1));
+    return { album: c.appleAlbums.get(appleId) || tracks[0].album, tracks };
+  }
   const album = c.albums.find((a) => a.id === id);
   if (!album) throw fail("unavailable", "No such album");
   await coverForAlbum(album);
+  await artworkForTracks(c, (c.albumTracks.get(id) || []).slice(0, 40));
   return { album, tracks: c.albumTracks.get(id) || [] };
 }
 
 export async function artist({ id }) {
   if (id !== ARTIST.id) throw fail("unavailable", "No such artist");
   const c = await loadCatalog();
+  await artworkForTracks(c, c.recent.slice(0, 50));
   return { artist: ARTIST, tracks: c.recent.slice(0, 100), albums: c.albums };
 }
 
